@@ -1,13 +1,11 @@
 # clmml
 
-FIXME: write description
+Clojure DSL for music programming 
 
 ## Usage
 
-FIXME: write
-
 ## License
 
-Copyright (C) 2010 FIXME
+Copyright (C) 2010 Ben Booth
 
 Distributed under the Eclipse Public License, the same as Clojure.
