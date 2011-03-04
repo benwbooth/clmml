@@ -1,8 +1,12 @@
 (ns clmml.note
   "Symbol parser for Clmml. Parses notes, rests, and measures."
-  (:require [edu.arizona.fnparse [hound :as h] [core :as c]]
-            [clojure.contrib [except :as except]])
-  (:use [clojure.contrib.string :only [codepoints]])
+  (:require [edu.arizona.fnparse [hound :as h] [core :as c]])
+  (:use [edu.arizona.fnparse.hound 
+         :only [match format-parse-error rep rep* hook 
+                defrule cat lit opt lex set-term term <end-of-input>]]
+        [clojure.contrib.string :only [codepoints]]
+        [clojure.contrib.condition]
+        [matchure])
   (:import (edu.arizona.fnparse.hound State)))
 
 ; - The ^ character clashes with the clojure metadata reader macro, so it
@@ -21,7 +25,7 @@
 ; - Since we're now using <> to represent constant insertion in clojure,
 ; interval and microtonal notation could be expressed as <<>>.
 ;
-; c##WH..++>2<3!70?30
+; c##*WH..++>2<3!70?30
 ; bnwh..
 
 (defn str-codepoints 
@@ -40,139 +44,175 @@
 
 ;;; The parser starts here:
 
-(h/defrule digits
+(defrule digits
   "Decimal digits"
-  (h/hook #(Integer. (str* %))
-          (h/rep (h/set-term "Decimal digits" (str-codepoints "0123456789")))))
+  (hook #(Integer. (str* %))
+          (rep (set-term "Decimal digits" (str-codepoints "0123456789")))))
 
-(h/defrule decimal
+(defrule decimal
   "A decimal number"
-  (h/hook #(Double. (str* %))
-          (h/cat digits (h/opt (h/cat (h/lit ".") digits)))))
+  (hook #(Double. (str* %))
+          (cat digits (opt (cat (lit ".") digits)))))
 
 (defn note-name-char [string]
   (if (empty? string) string 
     (or (Character/isLetter (codepoint string)) 
         (= "#" string) (= "_" string) (= "$" string))))
 
-(h/defrule note-name
+(defrule note-name
   "Note name"
-  (h/hook #(str* %)
-          (h/rep (h/term "Unicode Letter, #, $, or _"
-            #))))
+  (hook #(str* %)
+          (rep (term "Unicode Letter, #, $, or _"
+            note-name-char))))
 
-(h/defrule plus-minus
-  "Plus or minus symbol"
-  (h/+ (h/lit "+") (h/lit "-")))
+(defrecord PlusMinusDigits [rel value])
 
-(h/defrule plusses
-  "Series of plusses"
-  (h/rep (h/lit "+")))
+(defn-match make-plus-minus-digits
+  ([nil] (PlusMinusDigits. false nil))
+  ([(and (number? ?) ?value)] (PlusMinusDigits. false value))
+  ([["+" nil]] (PlusMinusDigits. true 1))
+  ([["+" (and (number? ?) ?value)]] (PlusMinusDigits. true value))
+  ([["+" [& ?value]]] (PlusMinusDigits. true (inc (count value))))
+  ([["-" nil]] (PlusMinusDigits. true -1))
+  ([["-" (and (number? ?) ?value)]] (PlusMinusDigits. true (- value)))
+  ([["-" [& ?value]]] (PlusMinusDigits. true (- (inc (count value))))))
 
-(h/defrule minuses
-  "Series of minuses"
-  (h/rep (h/lit "-")))
-
-(h/defrule plus-minus-digits
+(defrule plus-minus-digits
   "Plus, minus, equals a number"
-  (h/+ (h/cat (h/lit "+") (h/+ (h/rep (h/lit "+")) digits))
-       (h/cat (h/lit "-") (h/+ (h/rep (h/lit "-")) digits))
-       digits))
+  (hook make-plus-minus-digits
+    (h/+ (cat (lit "+") (opt (h/+ (rep (lit "+")) digits)))
+         (cat (lit "-") (opt (h/+ (rep (lit "-")) digits)))
+         digits)))
 
-(h/defrule plus-minus-decimal
+(defrule plus-minus-decimal
   "Plus, minus, equals a decimal number"
-  (h/+ (h/cat (h/lit "+") (h/+ (h/rep (h/lit "+")) decimal))
-       (h/cat (h/lit "-") (h/+ (h/rep (h/lit "-")) decimal))
-       decimal))
+  (hook make-plus-minus-digits
+    (h/+ (cat (lit "+") (opt (h/+ (rep (lit "+")) decimal)))
+         (cat (lit "-") (opt (h/+ (rep (lit "-")) decimal)))
+         decimal)))
 
-(h/defrule octave 
+(defrecord Octave [value])
+
+(defrule octave 
   "Note octave"
-  plus-minus-digits)
+  (hook #(Octave. %) plus-minus-digits))
 
-(h/defrule note
+(defrule note
   "Note name with optional octave"
-  (h/cat note-name (h/opt octave)))
+  (cat note-name (opt octave)))
 
-(h/defrule note-number
+(defrule note-number
   "Note Number"
-  (h/cat (h/lit "<") plus-minus-decimal (h/lit ">")))
+  (cat (lit "<") plus-minus-decimal (lit ">")))
 
-(h/defrule mbt
+(defrecord MBT [measures beats ticks])
+
+(defrule mbt
   "Measures:Beats:Ticks duration"
-  (h/cat digits 
-         (h/opt (h/cat (h/lit ":") digits 
-                       (h/opt (h/cat (h/lit ":") digits))))))
+  (hook (fn-match
+          ([[?m nil]] (MBT. m 0 0))
+          ([[?m [_ ?b nil]]] (MBT. m b 0))
+          ([[?m [_ ?b [_ ?t]]]] (MBT. m b t)))
+  (cat digits 
+         (opt (cat (lit ":") digits 
+                       (opt (cat (lit ":") digits)))))))
 
-(h/defrule smpte
+(defrule smpte
   "SMPTE duration"
-  (h/cat (h/opt (h/cat 
-               (h/opt (h/cat 
-                      (h/opt (h/cat 
-                             digits (h/lit ":"))) 
-                      digits (h/lit ":"))) 
-               digits (h/lit ":"))) digits (h/lit "s")))
+  (cat (opt (cat 
+               (opt (cat 
+                      (opt (cat 
+                             digits (lit ":"))) 
+                      digits (lit ":"))) 
+               digits (lit ":"))) digits (lit "s")))
 
-(h/defrule dotted
+(defrule dotted
   "Dotted duration modifier"
-  (h/rep (h/lit ".")))
+  (rep (lit ".")))
 
-(h/defrule fraction-notation
+(defrule fraction-notation
   "Fractional notation"
-  (h/rep (h/cat (h/set-term 
+  (rep (cat (set-term 
                   "Fractional Notation" 
-                  (str-codepoints "whqistxo")) (h/opt dotted))))
+                  (str-codepoints "whqistxo")) (opt dotted))))
 
-(h/defrule fraction
+(defrule fraction
   "%-delimited fraction"
-  (h/cat (h/opt digits) 
-         (h/rep (h/lit "%")) 
-         (h/opt digits)))
+  (cat (opt digits) 
+         (rep (lit "%")) 
+         (opt digits)))
 
-(h/defrule duration-atom
+(defrule duration-atom
   "Single duration atom"
-  (h/cat 
+  (cat 
     (h/+ 
       fraction-notation 
       ; smpte, fraction and mbt can all start with a number, 
       ; so enable backtracking here.
-      (h/lex fraction)
-      (h/lex smpte)
-      (h/lex mbt))
-    (h/opt dotted)))
+      (lex fraction)
+      (lex smpte)
+      (lex mbt))
+    (opt dotted)))
 
-(h/defrule duration
+(defrule plus-minus
+  "Plus or minus symbol"
+  (h/+ (lit "+") (lit "-")))
+
+(defrule duration
   "Duration attribute"
-  (h/cat (h/rep (h/lit "*")) 
-         (h/opt (h/cat duration-atom 
-                       (h/rep* (h/cat plus-minus duration-atom))))))
+  (cat (rep (lit "*")) 
+         (opt (cat duration-atom 
+                       (rep* (cat plus-minus duration-atom))))))
 
-(h/defrule displacement
+(defrecord Displacement [direction value])
+
+(defrule displacement
   "Note displacement attribute"
-  (h/cat (h/+ (h/lit ">") (h/lit "<")) (h/opt plus-minus-digits)))
+  (h/hook (fn-match
+            ([[">" (and (instance? PlusMinusDigits ?) ?p)]] (Displacement. :right p))
+            ([[">" [& ?value]]] (Displacement. :right (PlusMinusDigits. false (inc (count value)))))
+            ([["<" (and (instance? PlusMinusDigits ?) ?p)]] (Displacement. :left p))
+            ([["<" [& ?value]]] (Displacement. :left (PlusMinusDigits. false (inc (count value))))))
+    (h/+ (cat (lit ">") (h/+ (rep* (lit ">")) plus-minus-digits))
+         (cat (lit "<") (h/+ (rep* (lit "<")) plus-minus-digits)))))
 
-(h/defrule attack
+(defrecord Attack [value])
+
+(defrule attack
   "Note attack attribute"
-  (h/cat (h/rep (h/lit "!")) (h/opt plus-minus-digits)))
+  (hook (fn-match 
+            ([["!" (and (instance? PlusMinusDigits ?) ?p)]] (Attack. p))
+            ([["!" [& ?value]]] (Attack. (PlusMinusDigits. false (inc (count value))))))
+          (cat (lit "!") (h/+ (rep* (lit "!")) plus-minus-digits))))
 
-(h/defrule decay
+(defrecord Decay [value])
+
+(defrule decay
   "Note decay attribute"
-  (h/cat (h/rep (h/lit "?")) (h/opt plus-minus-digits)))
+  (hook (fn-match 
+            ([["?" (and (instance? PlusMinusDigits ?) ?p)]] (Decay. p))
+            ([["?" [& ?value]]] (Decay. (PlusMinusDigits. false (inc (count value))))))
+          (cat (lit "?") (h/+ (rep* (lit "?")) plus-minus-digits))))
 
-(h/defrule note-token
+(defrule note-token
   "Note token"
-  (h/cat (h/+ note note-number) 
-         (h/opt duration)
-         (h/opt displacement)
-         (h/opt attack)
-         (h/opt decay)))
+  (cat (h/+ note note-number) 
+         (opt duration)
+         (opt displacement)
+         (opt attack)
+         (opt decay)))
 
-(h/defrule measure
+(defrule measure
   "Measure bar"
-  (h/cat (h/lit "|") (h/opt (h/+ (h/rep (h/lit "|")) digits))))
+  (hook (fn-match 
+            ([["|" nil]] {:type :measure :value 1})
+            ([["|" (and (integer? ?) ?value)]] {:type :measure :value value})
+            ([["|" [& ?value]]] {:type :measure :value (inc (count value))}))
+          (cat (lit "|") (opt (+ (rep (lit "|")) digits)))))
 
-(h/defrule token
+(defrule token
   "Token"
-  (h/cat (h/+ note-token measure) h/<end-of-input>))
+  (cat (h/+ note-token measure) <end-of-input>))
 
 (defrecord Location 
   [line column]
@@ -195,13 +235,14 @@
 (defn read-symbol
   "Parse a clmml symbol."
   [input]
-  (h/match 
+  (match 
     ; Build a state object with Location starting from 1.
     ; Convert the input into a list of codepoint strings.
     (State. (str-codepoints input) 0 (Location. 1 1) #{} nil alter-location)
     token
     :success-fn (fn [product position] product)
     :failure-fn (fn [error]
-                  (except/throwf "Parsing error: %s"
-                    (h/format-parse-error error)))))
+                  (raise :type :parse-error 
+                         :message (format "Parsing error: %s" 
+                                          (format-parse-error error))))))
 

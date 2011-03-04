@@ -3,5 +3,6 @@
   :dependencies [[org.clojure/clojure "1.2.0"]
                  [org.clojure/clojure-contrib "1.2.0"]
                  [org.clojars.technomancy/clj-stacktrace "0.2.1-SNAPSHOT"]
+                 [matchure "0.10.1"]
                  [org.clojars.ohpauleez/fnparse "3.0.0alpha4"] ]
 )
