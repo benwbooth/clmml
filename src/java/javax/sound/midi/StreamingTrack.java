@@ -27,15 +27,7 @@ public class StreamingTrack extends Track {
   }
   private void update() {
     if (sequence != null) {
-      Sequencer sequencer = this.sequence.getSequencer();
-      if (sequencer != null) {
-        long tickPos = sequencer.getTickPosition(); 
-        long tick = super.ticks();
-        long updateTick = tickPos - tick;
-        if (updateTick > 0) {
-          sequence.update(updateTick); 
-        }
-      }
+      sequence.update(); 
     } 
   }
 }

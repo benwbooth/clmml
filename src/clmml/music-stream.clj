@@ -2,6 +2,8 @@
   (:refer-clojure :exclude [char])
   (:use [the.parsatron]))
 
+(def options {})
+
 (gen-class
    :name clmml.MusicStream
    :state music
@@ -16,10 +18,16 @@
 
 ;; java interop function that gets called by Sequence whenever it is detected
 ;; that more sequence needs to be evaluated.
-(defn MusicStream-advance [this sequence- ticks]
-  (dosync (alter (.music this) play sequence- ticks options)))
-
-(def options { :track [0] })
+(defn MusicStream-advance [this sequence-]
+  (let [ticks (.getTickLength sequence-)
+        sequencer (.getSequencer sequence-)
+        target-ticks (if (nil? sequencer) 
+                       ticks 
+                       (+ (or (:buffer options) 1000) 
+                          (.getTickPosition sequencer)))]
+    (dosync (alter (.music this) play 
+                   (merge options {:ticks ticks
+                                   :target-ticks target-ticks})))))
 
 ;; table of note names -> relative values
 (def notes (apply hash-map '(
@@ -98,30 +106,44 @@
           (merge options (meta music)) 
           options)
         sequence- (:sequence options)
-        ticks (:ticks options)]
+        ticks (or (:ticks options) 0)
+        target-ticks (or (:target-ticks options) 0)
+        track (or (:track options) 0)]
     (cond 
+      ;; we've already processed up until target-ticks, just return the music
+      ;; without processing it.
+      (>= ticks target-ticks) 
+      music
       ;; convert MidiMessages to MidiEvents
       (instance? javax.sound.midi.MidiMessage music)
-      (recur (javax.sound.midi.MidiEvent. music ticks))
+        (recur (javax.sound.midi.MidiEvent. music ticks))
       ;; MidiEvents get passed through directly
-      (instance? javax.sound.midi.MidiEvent music) 
-      (.add (aget (.getTracks sequence-) (:track options)) music)
+      (and (instance? javax.sound.midi.MidiEvent music) 
+           (not (nil? sequence-)))
+        (do (.add (aget (.getTracks sequence-) track) music)
+          nil)
       ;; parse tokens
-      (string? music) (recur (run (parse-token music)) options)
-      (symbol? music) (recur (run (parse-token (name music))) options)
-      (keyword? music) (recur (run (parse-token (str music))) options)
-      (integer? music) (recur (run (parse-token (str music))) options)
-      (char? music) (recur (run (parse-token (str music))) options)
+      (string? music) (recur (run (parse-token) music) options)
+      (keyword? music) (recur (run (parse-token) (str music)) options)
+      (symbol? music) (recur (run (parse-token) (name music)) options)
+      (number? music) (recur (run (parse-token) (str music)) options)
       ;; functions which update the sequence and/or return music
       (delay? music) (recur (force music options) options)
       (fn? music) (recur (apply music options) options)
-      (map? music) (recur ()
       ;; vectors play their contents in parallel
-      (vector? music) ()
+      (vector? music) 
+      (doseq [m music]
+        (recur (
+        
+              )
       ;; seqs play their contents in sequence
-      (seq? music) ()
+      (seq? music) 
+      (let [h (first seq)
+            r (rest seq)]
+
+        )
       ;; anything else is ignored
-      :else ())))
+      :else nil)))))
 
 ;; allowable characters in clojure symbols:
 ;; a1!#$&*_-=+|:<>'?/.

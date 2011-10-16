@@ -1,8 +1,9 @@
 (defproject clmml "0.1.0-SNAPSHOT"
   :description "Clojure DSL for music programming"
-  :dependencies [[org.clojure/clojure "1.2.0"]
-                 [org.clojure/clojure-contrib "1.2.0"]
-                 [org.clojars.technomancy/clj-stacktrace "0.2.1-SNAPSHOT"]
-                 [matchure "0.10.1"]
-                 [org.clojars.ohpauleez/fnparse "3.0.0alpha4"] ]
+  :java-source-path "src/java"
+  :disable-implicit-clean true
+  :dependencies [[org.clojure/clojure "1.3.0"]
+                 ;[the/parsatron "0.0.2"]
+                 [overtone/midi-clj "0.2.1"]
+                 [overtone/osc-clj "0.7.1"]]
 )

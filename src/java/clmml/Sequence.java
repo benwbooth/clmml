@@ -30,27 +30,27 @@ public class Sequence extends javax.sound.midi.Sequence {
   public Sequencer getSequencer() {
     return sequencer; 
   }
-  public void setSequencer(Sequencer sequencer) {
+  public synchronized void setSequencer(Sequencer sequencer) {
     this.sequencer = sequencer;
   }
 
-  public Track createTrack() {
+  public synchronized Track createTrack() {
     Track track = new StreamingTrack(this);
     tracks.addElement(track);
     return track;
   }
 
-  public void addStreamAdvanceListener(StreamAdvanceListener s) {
+  public synchronized void addStreamAdvanceListener(StreamAdvanceListener s) {
     listeners.add(s); 
   }
-  public boolean removeStreamAdvanceListener(StreamAdvanceListener s) {
+  public synchronized boolean removeStreamAdvanceListener(StreamAdvanceListener s) {
     return listeners.remove(s); 
   }
 
-  public void update(long ticks) {
+  public synchronized void update() {
     for (StreamAdvanceListener s : listeners) {
       if (s != null) {
-        s.advance(this, ticks);
+        s.advance(this);
       }
     }
   }
