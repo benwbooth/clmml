@@ -57,6 +57,7 @@
   (fn [options]
     (let [attrs (merge options attrs)
           value (note-value note attrs)
+          ticks (or (:ticks attrs) 0)
           begin-ticks (+ ticks (or (:displacement attrs) 0))
           end-ticks (+ ticks (or (:duration attrs) 0))
           note-on [(bit-or javax.sound.midi.ShortMessage/NOTE_ON 
@@ -83,9 +84,9 @@
       (if (contains? attrs :key-pressure-on)
         (if (and (not (contains? attrs :attack-on))
                  (not (contains? attrs :release-on)))
-          [key-pressure-event]
-          [note-on-event key-pressure-event note-off-event])
-        [note-on-event note-off-event]))))
+          (list key-pressure-event {:ticks end-ticks})
+          (list note-on-event key-pressure-event note-off-event))
+        (list note-on-event note-off-event)))))
 
 ;; define note parsers
 (doseq [note (keys notes)]
@@ -95,55 +96,11 @@
 
 ;; rest parser
 (defparser r []
-  (let->> [durexp (choice (parse-duration) (always nil))]
-    (Rest. durexp)))
-
-;; play the music to the sequence for ticks time
-;; then return the updated music
-(defn play [music options]
-  (let [options 
-        (if (instance? clojure.lang.IMeta music) 
-          (merge options (meta music)) 
-          options)
-        sequence- (:sequence options)
-        ticks (or (:ticks options) 0)
-        target-ticks (or (:target-ticks options) 0)
-        track (or (:track options) 0)]
-    (cond 
-      ;; we've already processed up until target-ticks, just return the music
-      ;; without processing it.
-      (>= ticks target-ticks) 
-      music
-      ;; convert MidiMessages to MidiEvents
-      (instance? javax.sound.midi.MidiMessage music)
-        (recur (javax.sound.midi.MidiEvent. music ticks))
-      ;; MidiEvents get passed through directly
-      (and (instance? javax.sound.midi.MidiEvent music) 
-           (not (nil? sequence-)))
-        (do (.add (aget (.getTracks sequence-) track) music)
-          nil)
-      ;; parse tokens
-      (string? music) (recur (run (parse-token) music) options)
-      (keyword? music) (recur (run (parse-token) (str music)) options)
-      (symbol? music) (recur (run (parse-token) (name music)) options)
-      (number? music) (recur (run (parse-token) (str music)) options)
-      ;; functions which update the sequence and/or return music
-      (delay? music) (recur (force music options) options)
-      (fn? music) (recur (apply music options) options)
-      ;; vectors play their contents in parallel
-      (vector? music) 
-      (doseq [m music]
-        (recur (
-        
-              )
-      ;; seqs play their contents in sequence
-      (seq? music) 
-      (let [h (first seq)
-            r (rest seq)]
-
-        )
-      ;; anything else is ignored
-      :else nil)))))
+  (let->> [duration (choice (parse-duration) (always nil))]
+          (fn [options]
+            (let [ticks (or (:ticks options) 0)
+                  duration (or duration (:duration-unit options) 0)]
+              {:ticks (+ ticks duration)}))))
 
 ;; allowable characters in clojure symbols:
 ;; a1!#$&*_-=+|:<>'?/.
@@ -151,17 +108,6 @@
 ;; : cannot be followed by another :
 ;; # not followed by ' or _, not at beginning
 ;; ' cannot be at the beginning
-
-(defparser parse-token []
-  (choice (parse-symbol)
-          (parse-value :value)
-          (parse-duration)
-          (parse-attack)
-          (parse-release)
-          (parse-key-pressure)
-          (parse-displacement)
-          (parse-measure-bar)
-          (parse-track-channel)))
 
 (defparser parse-symbol [] 
   (let->> [l1 (choice (letter) (char \_))
@@ -201,30 +147,36 @@
           old-value (or (find param options) 0)]
       (let->> [sign (choice (many1 (char \+)) (many1 (char \-)) (char \=) (always nil))
                value (many (digit))]
-              {param (let [value (or value 0)]
-                        (cond
-                          (or (nil? sign) (= (get sign 0) \+))
-                          (+ old-value (count sign) (value))
-                          (= (get sign 0) \-)
-                          (- old-value (count sign) (value))
-                          (= sign \=)
-                          value))}))))
+              (if (and (empty? sign) (empty? value))
+                (never)
+                {param (let [value (or value 0)]
+                  (cond
+                    (or (nil? sign) (= (get sign 0) \+))
+                    (+ old-value (count sign) value)
+                    (= (get sign 0) \-)
+                    (- old-value (count sign) value)
+                    (= sign \=)
+                    (if (nil? value) old-value value)))})))))
 
 (defparser parse-params [ch param]
   (let->> [op (many1 (char ch))
-           value (parse-value param)]
-          {param (* value (- 2 (/ 1 (long (Math/pow 2 (dec (count op)))))))}))
+           value (choice (parse-value param) (always nil))]
+          (let [old-value (or (find param options) 0)]
+            {param 
+             (if (nil? value)
+               (* old-value (- 2 (/ 1 (long (Math/pow 2 (count op))))))
+               (* value (- 2 (/ 1 (long (Math/pow 2 (dec (count op))))))))})))
 
 (defparser parse-attack [] 
-           (parse-params [\! :attack]))
+           (parse-params \! :attack))
 (defparser parse-release [] 
-           (parse-params [\? :release]))
+           (parse-params \? :release))
 (defparser parse-key-pressure [] 
-           (parse-params [\& :key-pressure]))
+           (parse-params \& :key-pressure))
 (defparser parse-displacement [] 
-           (choice (let->> [displacement (parse-params [\< :displacement])]
+           (choice (let->> [displacement (parse-params \< :displacement)]
                            {:displacement (- (:displacement displacement))}
-                   (parse-params [\> :displacement]))))
+                   (parse-params \> :displacement))))
 
 (defparser parse-track-channel []
   (let->> [_ (char \$)
@@ -264,7 +216,7 @@
                 nil)))))
 
 ;; shunting-yard algorithm: http://en.wikipedia.org/wiki/Shunting_yard_algorithm
-(defparser parse-duration-expr []
+(defparser parse-duration []
   (let->> [_ (char \:)
            value (choice (attempt (parse-dotted-duration)) 
                          (parse-timing))
@@ -388,4 +340,115 @@
              (let->> [_ (always nil)]
                      (timing-to-ticks 0 0 (if (empty? t1) 0 (Integer/parseInt t1))
                                       (if (empty? t2) 0 (Integer/parseInt t2)))))))
+
+(defparser parse-token []
+  (choice (parse-symbol)
+          (parse-value :value)
+          (parse-duration)
+          (parse-attack)
+          (parse-release)
+          (parse-key-pressure)
+          (parse-displacement)
+          (parse-measure-bar)
+          (parse-track-channel)))
+
+;; play the music to the sequence for ticks time
+;; then return the updated music
+;; TODO: avoid stack overflows
+(defn play [music options]
+  (let [options 
+        (if (instance? clojure.lang.IMeta music) 
+          (merge options (meta music)) 
+          options)
+        sequence- (:sequence options)
+        ticks (or (:ticks options) 0)
+        target-ticks (or (:target-ticks options) 0)
+        track (or (:track options) 0)]
+    (cond 
+      ;; we've already processed up until target-ticks, just return the music
+      ;; without processing it.
+      (>= ticks target-ticks) 
+        music
+      ;; convert MidiMessages to MidiEvents
+      (instance? javax.sound.midi.MidiMessage music)
+        (do (when (not (nil? sequence-)) 
+              (let [tracks (.getTracks sequence-)
+                    num-tracks (count tracks)]
+                (when (> num-tracks 0)
+                  (.add (aget tracks (max 0 (min num-tracks track))) 
+                        (javax.sound.midi.MidiEvent. music ticks)))))
+          nil)
+      ;; MidiEvents get passed through directly
+      (instance? javax.sound.midi.MidiEvent music)
+        (recur (list {:ticks (.getTick music)} (.getMessage music)) options)
+      ;; parse tokens
+      (string? music) 
+        (recur (run (parse-token) (with-meta (seq music) options)) options)
+      (keyword? music) 
+        (recur (run (parse-token) (with-meta (seq (str music)) options)) options)
+      (symbol? music) 
+        (recur (run (parse-token) (with-meta (seq (name music)) options)) options)
+      (number? music) 
+        (recur (run (parse-token) (with-meta (seq (str music)) options)) options)
+      ;; functions which update the sequence and/or return music
+      (delay? music) (recur (force music (merge options (meta music))) 
+                            (merge options (meta music)))
+      (fn? music) (recur (apply music (merge options (meta music))) 
+                         (merge options (meta music)))
+      ;; vectors play their contents in parallel
+      (vector? music)
+        (if (empty? music)
+          nil
+          (let [music (loop [music music 
+                            options options
+                            outmusic []]
+                        (let [m (first music)
+                              ms (rest music)]
+                          (if (map? m)
+                            ;; update state and continue
+                            (recur ms (merge options m) (conj outmusic m))
+                            ;; play each value in the vector, overriding ticks
+                            ;; with the current tick value
+                            (let [result (play m (merge options {:ticks ticks}))]
+                              (if (empty? ms)
+                                (conj outmusic result)
+                                (recur ms options (conj outmusic result)))))))]
+            (if (every? map? music)
+              ;; merge finished vectors into a single map
+              {:ticks (or (:ticks (apply merge music)) ticks)}
+              ;; return unfinished vector
+              (with-meta music options))))
+      ;; seqs play their contents in sequence
+      (seq? music)
+        (if (empty? music)
+          {:ticks ticks}
+          (let [m (first music)
+                ms (rest music)]
+            (if (map? m)
+              ;; update state and continue
+              (recur ms (merge options m))
+              (let [result (play m options)]
+                (cond
+                  ;; update state and continue
+                  (map? result) (recur ms (merge options result))
+                  ;; unfinished seq - just return
+                  (seq? result) (with-meta (cons result ms) options)
+                  ;; unfinished vector - keep it and attempt to continue
+                  ;; processing this seq
+                  (vector? result) 
+                    ;; last map in vector 
+                    (let [opt (if (map? (last result)) (last result) nil)]
+                      (if (nil? opt)
+                        ;; last element of vector unfinished, no need to continue
+                        (with-meta (cons result ms) options)
+                        ;; attempt to continue processing this seq
+                        ;; NOTE: this might overflow the stack!
+                        (let [more (play ms (merge options opt))]
+                          (with-meta (cons result (if (seq? more) more (list more))) options))))
+                  ;; unrecognized element - skip
+                  (nil? result) (recur ms options)
+                  ;; MidiMessage/Event - not ready yet, do not continue
+                  :else (with-meta (cons result ms) options))))))
+      ;; anything else is ignored
+      :else nil)))
 
