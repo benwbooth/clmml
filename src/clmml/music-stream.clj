@@ -1,8 +1,35 @@
-(ns clmml.music-stream
+;; TODO:
+;;  key signatures
+;;  time signatures
+;;  chords
+;;  cc's
+;;  pitch wheel
+;;  program change
+
+(ns aria
   (:refer-clojure :exclude [char])
   (:use [the.parsatron]))
 
-(def options {})
+(def options 
+  {:sequence nil ; sequence object
+   :track 0 ; track number
+   :channel 0 ; channel number
+   :meter [4 4] ; meter [beats-per-measure beats-per-whole-note &
+                ;        ticks-per-metronome-click 
+                ;        notated-32nd-notes-per-quarter-note]
+   :last-meter-event 0 ; tick value of last meter event
+   :buffer 1000 ; buffer size in ticks--necessary for negative note displacement
+   :ticks 0 ; current tick value
+   :target-ticks 0 ; stop generaing MIDI events after target-ticks is reached
+   :value 4 ; default assignment value
+   :value-fn #({:value %}) ; callback function for when a value is assigned
+   :displacement 0 ; note start time displacement in +/- ticks
+   :duration 0 ; default note duration amount in ticks
+   :duration-unit 0 ; duration unit size in ticks (ratios are multiplied by this)
+   :attack 64 ; default attack value (0-127)
+   :release 64 ; default release value (0-127)
+   :key-pressure 64 ; default key-pressure value (0-127)
+   })
 
 (gen-class
    :name clmml.MusicStream
@@ -88,6 +115,26 @@
           (list note-on-event key-pressure-event note-off-event))
         (list note-on-event note-off-event)))))
 
+(defparser parse-note-attrs []
+  (let->> [value (let->> [value (choice (parse-value #({:value %})) (always nil))]
+                         (if (nil? value) {} {:value value}))
+           attrs (many (choice (let->> [duration (parse-duration)]
+                                       {:duration duration})
+                               (let->> [attack (parse-attack)]
+                                       {:attack attack 
+                                        :attack-on true})
+                               (let->> [release (parse-release)]
+                                       {:release release 
+                                        :release-on true})
+                               (let->> [key-pressure (parse-key-pressure)]
+                                       {:key-pressure key-pressure 
+                                        :key-pressure-on true})
+                               (let->> [displacement (parse-displacement)]
+                                       {:displacement displacement})
+                               (let->> [track-channel (parse-track-channel)]
+                                       {:track-channel track-channel})))]
+          (apply merge (cons value attrs))))
+
 ;; define note parsers
 (doseq [note (keys notes)]
   (eval 
@@ -117,29 +164,11 @@
             (if (nil? symbol-var)
               (never)
               (let [symbol-val (deref symbol-var)]
-                (if (fn? symbol-val)
-                  (apply symbol-val)
-                  (never)))))))
-
-(defparser parse-note-attrs []
-  (let->> [value (let->> [value (choice (parse-value :value) (always nil))]
-                         (if (nil? value) {} {:value value}))
-           attrs (many (choice (let->> [duration (parse-duration)]
-                                       {:duration duration})
-                               (let->> [attack (parse-attack)]
-                                       {:attack attack 
-                                        :attack-on true})
-                               (let->> [release (parse-release)]
-                                       {:release release 
-                                        :release-on true})
-                               (let->> [key-pressure (parse-key-pressure)]
-                                       {:key-pressure key-pressure 
-                                        :key-pressure-on true})
-                               (let->> [displacement (parse-displacement)]
-                                       {:displacement displacement})
-                               (let->> [track-channel (parse-track-channel)]
-                                       {:track-channel track-channel})))]
-          (apply merge (cons value attrs))))
+                (cond (fn? symbol-val)
+                        (apply symbol-val)
+                      (delay? symbol-val)
+                        (force symbol-val)
+                      :else (never)))))))
 
 (defn parse-value [param]
   (fn [{:keys [input pos] :as state} cok cerr eok eerr]
@@ -149,18 +178,19 @@
                value (many (digit))]
               (if (and (empty? sign) (empty? value))
                 (never)
-                {param (let [value (or value 0)]
-                  (cond
-                    (or (nil? sign) (= (get sign 0) \+))
-                    (+ old-value (count sign) value)
-                    (= (get sign 0) \-)
-                    (- old-value (count sign) value)
-                    (= sign \=)
-                    (if (nil? value) old-value value)))})))))
+                (param 
+                  (let [value (or value 0)]
+                    (cond
+                      (or (nil? sign) (= (get sign 0) \+))
+                      (+ old-value (count sign) value)
+                      (= (get sign 0) \-)
+                      (- old-value (count sign) value)
+                      (= sign \=)
+                      (if (nil? value) old-value value)))))))))
 
 (defparser parse-params [ch param]
   (let->> [op (many1 (char ch))
-           value (choice (parse-value param) (always nil))]
+           value (choice (parse-value #({param %})) (always nil))]
           (let [old-value (or (find param options) 0)]
             {param 
              (if (nil? value)
@@ -204,14 +234,18 @@
           meter (:meter options)
           beats-per-measure (or (first meter) 4)
           beats-per-whole-note (or (second meter) 4)
-          quarter-notes-per-beat (/ 4 beats-per-whole-note)
+          quarter-notes-per-beat 
+            (if (= 0 beats-per-whole-note) 0 (/ 4 beats-per-whole-note))
           ticks (or (:ticks options) 0)
-          ticks-per-measure (* beats-per-measure quarter-notes-per-beat resolution)]
+          ticks-per-measure (* beats-per-measure quarter-notes-per-beat resolution)
+          last-meter-event (or (:last-meter-event options) 0)]
       (let->> [op (many1 (char \|))
                value (or (many (digit)) 0)]
               (if (= divisionType javax.sound.midi.Sequence/PPQ)
                 {:ticks (+ ticks
-                           (mod ticks ticks-per-measure)
+                           (if (= 0 ticks-per-measure) 0 
+                             (mod (- ticks last-meter-event) 
+                                  ticks-per-measure))
                            (* ticks-per-measure (+ (dec (count op)) (dec value))))}
                 nil)))))
 
@@ -260,13 +294,11 @@
           quarter-notes-per-beat (/ 4 beats-per-whole-note)
           duration-unit (or (:duration-unit options) 1)]
       (always (cond
-                (= divisionType javax.sound.midi.Sequence/PPQ)
                 ;; duration-unit is fraction of a beat
-                (* ratio duration-unit quarter-notes-per-beat resolution)
-                :else
+                (= divisionType javax.sound.midi.Sequence/PPQ)
+                  (* ratio duration-unit quarter-notes-per-beat resolution)
                 ;; duration-unit is fraction of a second
-                (* ratio duration-unit resolution)
-                )))))
+                :else (* ratio duration-unit resolution))))))
 
 (defparser parse-dotted-duration []
   (choice
@@ -341,16 +373,18 @@
                      (timing-to-ticks 0 0 (if (empty? t1) 0 (Integer/parseInt t1))
                                       (if (empty? t2) 0 (Integer/parseInt t2)))))))
 
-(defparser parse-token []
-  (choice (parse-symbol)
-          (parse-value :value)
-          (parse-duration)
-          (parse-attack)
-          (parse-release)
-          (parse-key-pressure)
-          (parse-displacement)
-          (parse-measure-bar)
-          (parse-track-channel)))
+(defn parse-token []
+  (fn [{:keys [input pos] :as state} cok cerr eok eerr]
+    (let [options (meta input)]
+      (choice (parse-symbol)
+              (parse-value (or (:value-fn options) #({:value %})))
+              (parse-duration)
+              (parse-attack)
+              (parse-release)
+              (parse-key-pressure)
+              (parse-displacement)
+              (parse-measure-bar)
+              (parse-track-channel)))))
 
 ;; play the music to the sequence for ticks time
 ;; then return the updated music
@@ -442,7 +476,7 @@
                         ;; last element of vector unfinished, no need to continue
                         (with-meta (cons result ms) options)
                         ;; attempt to continue processing this seq
-                        ;; NOTE: this might overflow the stack!
+                        ;; FIXME: this might overflow the stack!
                         (let [more (play ms (merge options opt))]
                           (with-meta (cons result (if (seq? more) more (list more))) options))))
                   ;; unrecognized element - skip
