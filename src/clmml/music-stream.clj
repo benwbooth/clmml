@@ -389,11 +389,11 @@
 ;; play the music to the sequence for ticks time
 ;; then return the updated music
 ;; TODO: avoid stack overflows
-(defn play [music options]
+(defn play [music & options _]
   (let [options 
         (if (instance? clojure.lang.IMeta music) 
           (merge options (meta music)) 
-          options)
+          (or options {}))
         sequence- (:sequence options)
         ticks (or (:ticks options) 0)
         target-ticks (or (:target-ticks options) 0)
@@ -429,6 +429,9 @@
                             (merge options (meta music)))
       (fn? music) (recur (apply music (merge options (meta music))) 
                          (merge options (meta music)))
+      (map? music) (if (:music music) 
+                     (recur (:music music) (merge options music {:music nil}))
+                     nil)
       ;; vectors play their contents in parallel
       (vector? music)
         (if (empty? music)
@@ -440,7 +443,10 @@
                               ms (rest music)]
                           (if (map? m)
                             ;; update state and continue
-                            (recur ms (merge options m) (conj outmusic m))
+                            ;; if there's :music, take it out and recur on it
+                            (recur (if (:music m) (vec (cons (:music m) ms)) ms) 
+                                   (merge options m {:music nil}) 
+                                   (conj outmusic (merge m {:music nil})))
                             ;; play each value in the vector, overriding ticks
                             ;; with the current tick value
                             (let [result (play m (merge options {:ticks ticks}))]
@@ -460,11 +466,13 @@
                 ms (rest music)]
             (if (map? m)
               ;; update state and continue
-              (recur ms (merge options m))
+              (recur (if (:music m) (cons (:music m) ms) ms) 
+                     (merge options m {:music nil}))
               (let [result (play m options)]
                 (cond
                   ;; update state and continue
-                  (map? result) (recur ms (merge options result))
+                  (map? result) (recur (if (:music result) (cons (:music result) ms)) 
+                                       (merge options result {:music nil}))
                   ;; unfinished seq - just return
                   (seq? result) (with-meta (cons result ms) options)
                   ;; unfinished vector - keep it and attempt to continue
