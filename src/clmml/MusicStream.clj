@@ -1,5 +1,5 @@
 (ns clmml.MusicStream
-  (:use [clmml.music-stream])
+  (:use [clmml.core])
   (:gen-class
     :state music
     :init init

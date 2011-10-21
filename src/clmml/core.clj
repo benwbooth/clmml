@@ -23,7 +23,9 @@
   (:refer-clojure :exclude [char replace reverse])
   (:import [javax.sound.midi])
   (:use [the.parsatron] 
-        [clojure.string]))
+        [clojure.string]
+        [overtone.midi]
+        [overtone.osc]))
 
 (def options 
   {:sequence nil ; sequence object
