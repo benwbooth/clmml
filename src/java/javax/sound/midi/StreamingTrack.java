@@ -27,7 +27,7 @@ public class StreamingTrack extends Track {
   }
   private void update() {
     if (sequence != null) {
-      sequence.update(); 
+      sequence.update();
     } 
   }
 }

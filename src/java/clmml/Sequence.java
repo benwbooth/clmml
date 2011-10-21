@@ -9,7 +9,7 @@ import java.util.ArrayList;
 
 public class Sequence extends javax.sound.midi.Sequence {
   private Sequencer sequencer;
-  private List<StreamAdvanceListener> listeners = new ArrayList<StreamAdvanceListener>();
+  private List<SequenceAdvanceListener> listeners = new ArrayList<SequenceAdvanceListener>();
 
   public Sequence(Sequencer sequencer, float divisionType, int resolution) 
     throws InvalidMidiDataException 
@@ -40,15 +40,15 @@ public class Sequence extends javax.sound.midi.Sequence {
     return track;
   }
 
-  public synchronized void addStreamAdvanceListener(StreamAdvanceListener s) {
+  public synchronized void addSequenceAdvanceListener(SequenceAdvanceListener s) {
     listeners.add(s); 
   }
-  public synchronized boolean removeStreamAdvanceListener(StreamAdvanceListener s) {
+  public synchronized boolean removeSequenceAdvanceListener(SequenceAdvanceListener s) {
     return listeners.remove(s); 
   }
 
   public synchronized void update() {
-    for (StreamAdvanceListener s : listeners) {
+    for (SequenceAdvanceListener s : listeners) {
       if (s != null) {
         s.advance(this);
       }
