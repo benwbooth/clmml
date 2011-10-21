@@ -21,7 +21,7 @@
 
 (ns clmml.core
   (:refer-clojure :exclude [char replace reverse])
-  (:import [javax.sound.midi])
+  (:import [javax.sound.midi] [clmml])
   (:use [the.parsatron] 
         [clojure.string]
         [overtone.midi]
@@ -39,7 +39,7 @@
    :last-meter-event 0 ; tick value of last meter event
    :buffer 100 ; buffer size in ticks--necessary for negative note displacement
    :ticks 0 ; current tick value
-   :target-ticks 0 ; stop generaing MIDI events after target-ticks is reached
+   :target-ticks nil ; stop generaing MIDI events after target-ticks is reached
    :octave 4 ; default octave
    :value-fn #({:octave %}) ; callback function for when a value is assigned
    :displacement 0 ; note start time displacement in +/- ticks
@@ -398,7 +398,7 @@
     (cond 
       ;; we've already processed up until target-ticks, just return the music
       ;; without processing it.
-      (>= ticks target-ticks) 
+      (and (not (nil? target-ticks)) (>= ticks target-ticks))
         music
       ;; convert MidiMessages to MidiEvents
       (instance? javax.sound.midi.MidiMessage music)

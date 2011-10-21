@@ -11,6 +11,18 @@ public class Sequence extends javax.sound.midi.Sequence {
   private Sequencer sequencer;
   private List<SequenceAdvanceListener> listeners = new ArrayList<SequenceAdvanceListener>();
 
+  public Sequence(float divisionType, int resolution) 
+    throws InvalidMidiDataException 
+  {
+    super(divisionType, resolution); 
+  }
+
+  public Sequence(Sequencer sequencer, float divisionType, int resolution, int numTracks) 
+    throws InvalidMidiDataException 
+  {
+    super(divisionType, resolution, numTracks);
+  }
+
   public Sequence(Sequencer sequencer, float divisionType, int resolution) 
     throws InvalidMidiDataException 
   {
@@ -22,6 +34,7 @@ public class Sequence extends javax.sound.midi.Sequence {
     throws InvalidMidiDataException 
   {
     super(divisionType, resolution);
+    this.sequencer = sequencer;
     for (int i = 0; i < numTracks; i++) {
         tracks.addElement(new StreamingTrack(this));
     }

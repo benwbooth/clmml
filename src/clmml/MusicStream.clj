@@ -16,7 +16,7 @@
   (let [sequencer (.getSequencer sequence-)
         ticks (.getTickLength sequence-)
         target-ticks (if (nil? sequencer) 
-                       ticks 
+                       nil
                        (+ (or (:buffer options) 100) 
                           (.getTickPosition sequencer)))]
     (dosync (alter (.music this) play 
