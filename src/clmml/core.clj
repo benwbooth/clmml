@@ -21,34 +21,35 @@
 
 (ns clmml.core
   (:refer-clojure :exclude [char replace reverse])
-  (:import [javax.sound.midi] [clmml])
   (:use [the.parsatron] 
+        [data.priority-map]
         [clojure.string]
         [overtone.midi]
         [overtone.osc]))
 
-(def options 
-  {:sequence nil ; sequence object
-   :track 0 ; track number
-   :channel 0 ; channel number
-   :meter [4 4] ; meter:
-                ;   beats-per-measure (default 4)
-                ;   beats-per-whole-note (default 4)
-                ;   ticks-per-metronome-click (depends on PPQ setting)
-                ;   notated-32nd-notes-per-quarter-note (default 8)
-   :last-meter-event 0 ; tick value of last meter event
-   :buffer 100 ; buffer size in ticks--necessary for negative note displacement
-   :ticks 0 ; current tick value
-   :target-ticks nil ; stop generaing MIDI events after target-ticks is reached
-   :octave 4 ; default octave
-   :value-fn #({:octave %}) ; callback function for when a value is assigned
-   :displacement 0 ; note start time displacement in +/- ticks
-   :duration 0 ; default note duration amount in ticks
-   :duration-unit 0 ; duration unit size in ticks (ratios are multiplied by this)
-   :attack 64 ; default attack value (0-127)
-   :release 64 ; default release value (0-127)
-   :key-pressure 64 ; default key-pressure value (0-127)
-   })
+(defrecord Music [music duration])
+
+;; (def options 
+;;   {:track 0 ; track number
+;;    :channel 0 ; channel number
+;;    :meter [4 4] ; meter:
+;;                 ;   beats-per-measure (default 4)
+;;                 ;   beats-per-whole-note (default 4)
+;;                 ;   ticks-per-metronome-click (depends on PPQ setting)
+;;                 ;   notated-32nd-notes-per-quarter-note (default 8)
+;;    :last-meter-event 0 ; tick value of last meter event
+;;    :buffer 100 ; buffer size in ticks--necessary for negative note displacement
+;;    :ticks 0 ; current tick value
+;;    :target-ticks nil ; stop generaing MIDI events after target-ticks is reached
+;;    :octave 4 ; default octave
+;;    :value-fn #({:octave %}) ; callback function for when a value is assigned
+;;    :displacement 0 ; note start time displacement in +/- ticks
+;;    :duration 0 ; default note duration amount in ticks
+;;    :duration-unit 0 ; duration unit size in ticks (ratios are multiplied by this)
+;;    :attack 64 ; default attack value (0-127)
+;;    :release 64 ; default release value (0-127)
+;;    :key-pressure 64 ; default key-pressure value (0-127)
+;;    })
 
 ;; table of note names -> relative values
 (def notes (apply hash-map '(
@@ -62,7 +63,7 @@
     c 0   c# 1   c## 2   cb -1  cbb -2  cn 0  
     d 2   d# 3   d## 4   db 1   dbb 0   dn 2  
     e 4   e# 5   e## 6   eb 3   ebb 2   en 4  
-    f 5   f# 6   f## 7   fb 4   fbb 3   fN 5  
+    f 5   f# 6   f## 7   fb 4   fbb 3   fn 5  
     g 7   g# 8   g## 9   gb 6   gbb 5   gn 7  
     a 9   a# 10  a## 11  ab 8   abb 7   an 9  
     b 11  b# 12  b## 13  bb 10  bbb 9   bn 11 
@@ -151,9 +152,8 @@
 (defn ratio-to-ticks [ratio]
   (fn [{:keys [input pos] :as state} cok cerr eok eerr]
     (let [options (meta input)
-          sequence- (:sequence options)
-          divisionType (.getDivisionType sequence-)
-          resolution (.getResolution sequence-)
+          divisionType (:division_type options)
+          resolution (:resolution options)
           meter (:meter options)
           beats-per-measure (or (first meter) 4)
           beats-per-whole-note (or (second meter) 4)
@@ -179,9 +179,8 @@
 (defn timing-to-ticks [t1 t2 t3 t4]
   (fn [{:keys [input pos] :as state} cok cerr eok eerr]
     (let [options (meta input)
-          sequence- (:sequence options)
-          divisionType (.getDivisionType sequence-)
-          resolution (.getResolution sequence-)
+          divisionType (:division_type options)
+          resolution (:resolution options)
           meter (:meter options)
           beats-per-measure (first meter)
           beats-per-whole-note (second meter)
@@ -232,7 +231,6 @@
                                 (list (symbol op) value)))]
           (let [durexp (cons value (flatten values))
                 opmap {'+ 0 '- 0 '* 1}]
-            (fn [sequence- ticks options]
               (loop [durexp durexp outq [] opstack []]
                 (let [token (first durexp)]
                   (cond 
@@ -252,7 +250,7 @@
                                (pop opstack))
                         (recur (rest durexp) outq (conj opstack token)))
                     (number? token)
-                      (recur (rest durexp) (conj outq token) opstack))))))))
+                      (recur (rest durexp) (conj outq token) opstack)))))))
 
 (defparser parse-duration []
   (let->> [_ (char \:)
@@ -350,9 +348,8 @@
 (defn parse-measure-bar []
   (fn [{:keys [input pos] :as state} cok cerr eok eerr]
     (let [options (meta input)
-          sequence- (:sequence options)
-          divisionType (.getDivisionType sequence-)
-          resolution (.getResolution sequence-)
+          divisionType (:division_type options)
+          resolution (:resolution options)
           meter (:meter options)
           beats-per-measure (or (first meter) 4)
           beats-per-whole-note (or (second meter) 4)
@@ -384,111 +381,93 @@
               (parse-measure-bar)
               (parse-track-channel)))))
 
-;; play the music to the sequence for ticks time
-;; then return the updated music
-;; TODO: avoid stack overflows
-(defn play [music & options]
-  (let [options (apply merge (if (instance? clojure.lang.IMeta music) 
-                               (concat options (list (meta music)))
-                               options))
-        sequence- (:sequence options)
-        ticks (or (:ticks options) 0)
-        target-ticks (or (:target-ticks options) 0)
-        track (or (:track options) 0)]
-    (cond 
-      ;; we've already processed up until target-ticks, just return the music
-      ;; without processing it.
-      (and (not (nil? target-ticks)) (>= ticks target-ticks))
-        music
-      ;; convert MidiMessages to MidiEvents
-      (instance? javax.sound.midi.MidiMessage music)
-        (do (when (not (nil? sequence-)) 
-              (let [tracks (.getTracks sequence-)
-                    num-tracks (count tracks)]
-                (when (> num-tracks 0)
-                  (.add (aget tracks (max 0 (min num-tracks track))) 
-                        (javax.sound.midi.MidiEvent. music ticks)))))
-          nil)
-      ;; MidiEvents get passed through directly
-      (instance? javax.sound.midi.MidiEvent music)
-        (recur (list {:ticks (.getTick music)} (.getMessage music)) options)
-      ;; parse tokens
-      (string? music) 
-        (recur (run (parse-token) (with-meta (seq music) options)) options)
-      (keyword? music) 
-        (recur (run (parse-token) (with-meta (seq (str music)) options)) options)
-      (symbol? music) 
-        (recur (run (parse-token) (with-meta (seq (name music)) options)) options)
-      (number? music) 
-        (recur (run (parse-token) (with-meta (seq (str music)) options)) options)
-      ;; functions which update the sequence and/or return music
-      (delay? music) (recur (force music (merge options (meta music))) 
-                            (merge options (meta music)))
-      (fn? music) (recur (apply music (merge options (meta music))) 
-                         (merge options (meta music)))
-      (map? music) 
-        (if (:music music) 
-          (merge music {:music (play (:music music) (merge options music {:music nil}))})
-          music)
-      ;; vectors play their contents in parallel
-      (vector? music)
-        (if (empty? music)
-          nil
-          (let [music (loop [music music 
-                            options options
-                            outmusic []]
-                        (let [m (first music)
-                              ms (rest music)]
-                          (if (map? m)
-                            ;; update state and continue
-                            ;; if there's :music, take it out and recur on it
-                            (recur (if (:music m) (vec (cons (:music m) ms)) ms) 
-                                   (merge options m {:music nil}) 
-                                   (conj outmusic (merge m {:music nil})))
-                            ;; play each value in the vector, overriding ticks
-                            ;; with the current tick value
-                            (let [result (play m (merge options {:ticks ticks}))]
-                              (if (empty? ms)
-                                (conj outmusic result)
-                                (recur ms options (conj outmusic result)))))))]
-            (if (every? map? music)
-              ;; merge finished vectors into a single map
-              {:ticks (or (:ticks (apply merge music)) ticks)}
-              ;; return unfinished vector
-              (with-meta music options))))
-      ;; seqs play their contents in sequence
-      (seq? music)
-        (if (empty? music)
-          {:ticks ticks}
-          (let [m (first music)
-                ms (rest music)]
-            (if (map? m)
-              ;; update state and continue
-              (recur (if (:music m) (cons (:music m) ms) ms) 
-                     (merge options m {:music nil}))
-              (let [result (play m options)]
-                (cond
-                  ;; update state and continue
-                  (map? result) (recur (if (:music result) (cons (:music result) ms)) 
-                                       (merge options result {:music nil}))
-                  ;; unfinished seq - just return
-                  (seq? result) (with-meta (cons result ms) options)
-                  ;; unfinished vector - keep it and attempt to continue
-                  ;; processing this seq
-                  (vector? result) 
-                    ;; last map in vector 
-                    (let [opt (if (map? (last result)) (last result) nil)]
-                      (if (nil? opt)
-                        ;; last element of vector unfinished, no need to continue
-                        (with-meta (cons result ms) options)
-                        ;; attempt to continue processing this seq
-                        ;; FIXME: this might overflow the stack!
-                        (let [more (play ms (merge options opt))]
-                          (with-meta (cons result (if (seq? more) more (list more))) options))))
-                  ;; unrecognized element - skip
-                  (nil? result) (recur ms options)
-                  ;; MidiMessage/Event - not ready yet, do not continue
-                  :else (with-meta (cons result ms) options))))))
-      ;; anything else is ignored
-      :else nil)))
+;; play gets called on every tick event. Takes a playlist priority map
+;; and an output function which receives MidiMessages
+;; TODO: string, keyword, symbol, number -> (run (parse-token) ....)
+;; delay, fn, map, handle metadata
+(defn play [playlist out current-ticks buffer-ticks]
+  (if (empty? (:queue playlist))
+    playlist
+    (let [buffer-ticks (or buffer-ticks 0)
+          [[m _] ticks] (peek playlist)]
+      (if (> (+ current-ticks buffer-ticks) ticks)
+        playlist
+        (let [container (if (or (vector? m) (seq? m)) m (list m))
+              music (first container)
+              next (if (vector? container) (vec (rest container)) (rest container))]
+          (cond
+           ;; symbols, etc.
+           (string? music)
+           (recur (assoc (pop playlist)
+                    [(cons (run (parse-token) (seq music)) next) ticks] ticks)
+                  out current-ticks buffer-ticks)
+           (keyword? music)
+           (recur (assoc (pop playlist)
+                    [(cons (run (parse-token) (seq (str music))) next) ticks] ticks)
+                  out current-ticks buffer-ticks)
+           (symbol? music)
+           (recur (assoc (pop playlist)
+                    [(cons (run (parse-token) (seq (name music))) next) ticks] ticks)
+                  out current-ticks buffer-ticks)
+           (number? music)
+           (recur (assoc (pop playlist)
+                    [(cons (run (parse-token) (seq (str music))) next) ticks] ticks)
+                  out current-ticks buffer-ticks)
+           ;; functions, etc.
+           (delay? music)
+           (recur (assoc (pop playlist)
+                    [(cons (force music (meta music)) next) ticks] ticks)
+                  out current-ticks buffer-ticks)
+           (fn? music)
+           (recur (assoc (pop playlist)
+                    [(cons (apply music (meta music)) next) ticks] ticks)
+                  out current-ticks buffer-ticks)
+           ;; convert map -> metadata
+           ;; if map contains the :music key, convert it into music
+           ;; and set its metadata to map
+           (map? music)
+           (recur (assoc (pop playlist)
+                    [(if (contains? music :music)
+                       (if (vector? container)
+                         (vec (cons (with-meta (:music music) (dissoc music :music)) next))
+                         (cons (with-meta (:music music) (dissoc music :music)) next))
+                       (with-meta next (dissoc music :music))) ticks] ticks)
+                  out current-ticks buffer-ticks)
+           ;; rewrite the terms to factor non-seq/vector terms to the
+           ;; first position. Make sure metadata gets propagated
+           ;; through seqs/vectors.
+           (and (vector? music) (not (empty? music)))
+           (recur (assoc (pop playlist)
+                    [(vec (cons (with-meta (first music) (merge (meta music) (meta (first music))))
+                                (list (if (vector? container)
+                                        (with-meta (vec (cons (vec (rest music)) next)) (merge (meta music) (meta (first music)))))
+                                        (with-meta (cons (vec (rest music)) next) (merge (meta music) (meta (first music)))))))
+                     ticks] ticks)
+                  out current-ticks buffer-ticks)
+           (and (seq? music) (not (empty? music)))
+           (recur (assoc (pop playlist)
+                    [(cons (with-meta (first music) (merge (meta music) (meta (first music))))
+                           (list (if (vector? container)
+                             (with-meta (vec (cons (rest music) next)) (merge (meta music) (meta (first music))))
+                             (with-meta (cons (rest music) next) (merge (meta music) (meta (first music)))))))
+                     ticks] ticks)
+                  out current-ticks buffer-ticks)
+           ;; Music records send themselves to the out function, then
+           ;; queue the next part after duration.
+           (instance? Music music)
+           ;; handle displacement
+           (if (and (:displacement (meta music)) (< current-ticks (+ ticks (:displacement (meta music)))))
+             (recur (assoc (pop playlist)
+                      [container (+ ticks (:displacement (meta music)))] (+ ticks (:displacement (meta music))))
+                    out current-ticks buffer-ticks)
+             (do (when (not (nil? (:music music)))
+                   (out (:music music) (meta music)))
+                 ;; If this came from a vector, set the duration to zero.
+                 (let [duration (if (vector? container) 0 (:duration music))]
+                   (recur (assoc (pop playlist)
+                            [next (+ ticks duration)] (+ ticks duration))
+                          out current-ticks buffer-ticks))))
+           ;; skip anything else
+           :else
+           (recur (pop (:queue playlist)) out current-ticks buffer-ticks)))))))
 
