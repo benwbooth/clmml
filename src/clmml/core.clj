@@ -12,12 +12,14 @@
 ;;  channel pressure
 ;;  program change
 
-;; allowable characters in clojure symbols:
+;; allowable punctuation characters in clojure symbols:
 ;; a1!#$&*_-=+|:<>'?/.
 ;; / must be followed by a non-number
 ;; : cannot be followed by another :
 ;; # not followed by ' or _, not at beginning
 ;; ' cannot be at the beginning
+
+;; Use ScheduledThreadPoolExecutor for timing
 
 (ns clmml.core
   (:refer-clojure :exclude [char replace reverse])
@@ -26,6 +28,7 @@
         [clojure.core.match :only [match]]
         [overtone.midi]
         [overtone.osc]))
+
 
 (defrecord Music [music duration])
 (defrecord Tempo [tempo])
@@ -325,6 +328,7 @@
         (play-note ~(name note) (parse-note-attrs)))))
 
 ;; rest parser
+;; convert to nil Music value
 (defparser r []
   (let->> [duration (choice (parse-duration) (always nil))]
           (fn [options]
@@ -346,6 +350,8 @@
                         (force symbol-val)
                       :else (never)))))))
 
+;; TODO: convert to fancy rest
+;; need to know what the meter is, tick count at last meter change
 (defn parse-measure-bar []
   (fn [{:keys [input pos] :as state} cok cerr eok eerr]
     (let [options (meta input)
@@ -397,7 +403,15 @@
            out tempo-out (inc start) stop buffer)
     playlist))
 
-;; 
+;; transformations
+;; maps: ([{} b c] d e) -> (#^{} [<m> b c] d e)
+;;   ({} b c) -> #^{} (<m> b c)
+;; vectors: ([a b c] d e) -> [a ([b c] d e)] -> ([b c] d e)
+;; -> [b ([c] d e)] -> ([c] d e) -> (c d e) -> (d e) -> (d e)
+;; -> (e) -> ()
+;; seqs: (((c d) e) f g) -> ((c d) (e) f g) -> (c (d) (e) f g)
+;;   -> ((d) (e) f g) -> (d (e) f g) -> ((e) f g) -> (e f g) -> (f g)
+;;   -> (g) -> ()
 
 (defn play-tick [playlist out tempo-out tick-seq]
   (if (empty? tick-seq)
@@ -437,23 +451,30 @@
                          (vec (cons (with-meta (:music music) (dissoc music :music)) next))
                          (cons (with-meta (:music music) (dissoc music :music)) next))
                        (with-meta next (merge (meta next) music))) ticks] (rest tick-seq)))
+       (and (or (vector? music) (seq? music)) (map? (first music)))
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(if (contains? (first music) :music)
+                       (if (vector? music)
+                         (vec (cons (with-meta (:music music) (dissoc music :music)) next))
+                         (cons (with-meta (:music music) (dissoc music :music)) next))
+                       (with-meta next (merge (meta next) music))) ticks] (rest tick-seq)))
+              
        ;; rewrite the terms to factor non-seq/vector terms to the
        ;; first position. Make sure metadata gets propagated
        ;; through seqs/vectors.
-       ;; TODO: Fix metadata bleed-through
-       (and (vector? music) (not (empty? music)))
+       (and (vector? music) (> (count music) 1))
        (recur (dissoc playlist element) out tempo-out
               (cons [(vec (cons (with-meta (first music) (merge (meta music) (meta (first music))))
                                 (list (if (vector? container)
-                                        (with-meta (vec (cons (vec (rest music)) next)) (merge (meta music) (meta (first music)))))
-                                      (with-meta (cons (vec (rest music)) next) (merge (meta music) (meta (first music)))))))
+                                        (vec (cons (vec (rest music)) next))
+                                        (cons (vec (rest music)) next)))))
                      ticks] (rest tick-seq)))
-       (and (seq? music) (not (empty? music)))
+       (and (or (seq? music) (vector? music)) (not (empty? music)))
        (recur (dissoc playlist element) out tempo-out
               (cons [(cons (with-meta (first music) (merge (meta music) (meta (first music))))
                            (list (if (vector? container)
-                                   (with-meta (vec (cons (rest music) next)) (merge (meta music) (meta (first music))))
-                                   (with-meta (cons (rest music) next) (merge (meta music) (meta (first music)))))))
+                                   (vec (cons (rest music) next))
+                                   (cons (rest music) next))))
                      ticks] (rest tick-seq)))
        ;; Music objects send themselves to the out function, then
        ;; queue the next part after duration.
