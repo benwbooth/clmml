@@ -22,12 +22,13 @@
 (ns clmml.core
   (:refer-clojure :exclude [char replace reverse])
   (:use [the.parsatron] 
-        [data.priority-map]
         [clojure.string]
+        [clojure.core.match :only [match]]
         [overtone.midi]
         [overtone.osc]))
 
 (defrecord Music [music duration])
+(defrecord Tempo [tempo])
 
 ;; (def options 
 ;;   {:track 0 ; track number
@@ -381,93 +382,101 @@
               (parse-measure-bar)
               (parse-track-channel)))))
 
+;; create a new playlist
+(defn new-playlist [& elements]
+  (apply sorted-set-by (comparator (fn [x y] (< (second x) (second y)))) elements))
+
 ;; play gets called on every tick event. Takes a playlist priority map
 ;; and an output function which receives MidiMessages
-;; TODO: string, keyword, symbol, number -> (run (parse-token) ....)
-;; delay, fn, map, handle metadata
-(defn play [playlist out current-ticks buffer-ticks]
-  (if (empty? (:queue playlist))
+(defn play [playlist out tempo-out start stop buffer]
+  (if (< start (+ stop buffer))
+    (recur (play-tick playlist
+                      (if (< start stop) out nil)
+                      (if (< start stop) tempo-out nil)
+                      (subseq playlist >= [nil start] <= [nil start]))
+           out tempo-out (inc start) stop buffer)
+    playlist))
+
+;; 
+
+(defn play-tick [playlist out tempo-out tick-seq]
+  (if (empty? tick-seq)
     playlist
-    (let [buffer-ticks (or buffer-ticks 0)
-          [[m _] ticks] (peek playlist)]
-      (if (> (+ current-ticks buffer-ticks) ticks)
-        playlist
-        (let [container (if (or (vector? m) (seq? m)) m (list m))
-              music (first container)
-              next (if (vector? container) (vec (rest container)) (rest container))]
-          (cond
-           ;; symbols, etc.
-           (string? music)
-           (recur (assoc (pop playlist)
-                    [(cons (run (parse-token) (seq music)) next) ticks] ticks)
-                  out current-ticks buffer-ticks)
-           (keyword? music)
-           (recur (assoc (pop playlist)
-                    [(cons (run (parse-token) (seq (str music))) next) ticks] ticks)
-                  out current-ticks buffer-ticks)
-           (symbol? music)
-           (recur (assoc (pop playlist)
-                    [(cons (run (parse-token) (seq (name music))) next) ticks] ticks)
-                  out current-ticks buffer-ticks)
-           (number? music)
-           (recur (assoc (pop playlist)
-                    [(cons (run (parse-token) (seq (str music))) next) ticks] ticks)
-                  out current-ticks buffer-ticks)
-           ;; functions, etc.
-           (delay? music)
-           (recur (assoc (pop playlist)
-                    [(cons (force music (meta music)) next) ticks] ticks)
-                  out current-ticks buffer-ticks)
-           (fn? music)
-           (recur (assoc (pop playlist)
-                    [(cons (apply music (meta music)) next) ticks] ticks)
-                  out current-ticks buffer-ticks)
-           ;; convert map -> metadata
-           ;; if map contains the :music key, convert it into music
-           ;; and set its metadata to map
-           (map? music)
-           (recur (assoc (pop playlist)
-                    [(if (contains? music :music)
+    (let [[m ticks :as element] (first tick-seq)
+          container (if (or (vector? m) (seq? m)) m (list m))
+          music (first container)
+          next (if (vector? container) (vec (rest container)) (rest container))]
+      (cond
+       ;; symbols, etc.
+       (string? music)
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(cons (run (parse-token) (seq music)) next) ticks] (rest tick-seq)))
+       (keyword? music)
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(cons (run (parse-token) (seq (str music))) next) ticks] (rest tick-seq)))
+       (symbol? music)
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(cons (run (parse-token) (seq (name music))) next) ticks] (rest tick-seq)))
+       (number? music)
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(cons (run (parse-token) (seq (str music))) next) ticks] (rest tick-seq)))
+       ;; functions, etc.
+       (delay? music)
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(cons (force music (meta music)) next) ticks] (rest tick-seq)))
+       (fn? music)
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(cons (apply music (meta music)) next) ticks] (rest tick-seq)))
+       ;; convert map -> metadata
+       ;; if map contains the :music key, convert it into music
+       ;; and set its metadata to map
+       (map? music)
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(if (contains? music :music)
                        (if (vector? container)
                          (vec (cons (with-meta (:music music) (dissoc music :music)) next))
                          (cons (with-meta (:music music) (dissoc music :music)) next))
-                       (with-meta next (dissoc music :music))) ticks] ticks)
-                  out current-ticks buffer-ticks)
-           ;; rewrite the terms to factor non-seq/vector terms to the
-           ;; first position. Make sure metadata gets propagated
-           ;; through seqs/vectors.
-           (and (vector? music) (not (empty? music)))
-           (recur (assoc (pop playlist)
-                    [(vec (cons (with-meta (first music) (merge (meta music) (meta (first music))))
+                       (with-meta next (merge (meta next) music))) ticks] (rest tick-seq)))
+       ;; rewrite the terms to factor non-seq/vector terms to the
+       ;; first position. Make sure metadata gets propagated
+       ;; through seqs/vectors.
+       ;; TODO: Fix metadata bleed-through
+       (and (vector? music) (not (empty? music)))
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(vec (cons (with-meta (first music) (merge (meta music) (meta (first music))))
                                 (list (if (vector? container)
                                         (with-meta (vec (cons (vec (rest music)) next)) (merge (meta music) (meta (first music)))))
-                                        (with-meta (cons (vec (rest music)) next) (merge (meta music) (meta (first music)))))))
-                     ticks] ticks)
-                  out current-ticks buffer-ticks)
-           (and (seq? music) (not (empty? music)))
-           (recur (assoc (pop playlist)
-                    [(cons (with-meta (first music) (merge (meta music) (meta (first music))))
+                                      (with-meta (cons (vec (rest music)) next) (merge (meta music) (meta (first music)))))))
+                     ticks] (rest tick-seq)))
+       (and (seq? music) (not (empty? music)))
+       (recur (dissoc playlist element) out tempo-out
+              (cons [(cons (with-meta (first music) (merge (meta music) (meta (first music))))
                            (list (if (vector? container)
-                             (with-meta (vec (cons (rest music) next)) (merge (meta music) (meta (first music))))
-                             (with-meta (cons (rest music) next) (merge (meta music) (meta (first music)))))))
-                     ticks] ticks)
-                  out current-ticks buffer-ticks)
-           ;; Music records send themselves to the out function, then
-           ;; queue the next part after duration.
-           (instance? Music music)
-           ;; handle displacement
-           (if (and (:displacement (meta music)) (< current-ticks (+ ticks (:displacement (meta music)))))
-             (recur (assoc (pop playlist)
-                      [container (+ ticks (:displacement (meta music)))] (+ ticks (:displacement (meta music))))
-                    out current-ticks buffer-ticks)
-             (do (when (not (nil? (:music music)))
-                   (out (:music music) (meta music)))
-                 ;; If this came from a vector, set the duration to zero.
-                 (let [duration (if (vector? container) 0 (:duration music))]
-                   (recur (assoc (pop playlist)
-                            [next (+ ticks duration)] (+ ticks duration))
-                          out current-ticks buffer-ticks))))
-           ;; skip anything else
-           :else
-           (recur (pop (:queue playlist)) out current-ticks buffer-ticks)))))))
+                                   (with-meta (vec (cons (rest music) next)) (merge (meta music) (meta (first music))))
+                                   (with-meta (cons (rest music) next) (merge (meta music) (meta (first music)))))))
+                     ticks] (rest tick-seq)))
+       ;; Music objects send themselves to the out function, then
+       ;; queue the next part after duration.
+       ;; Tempo objects send themselves to the tempo-out function.
+       (or (instance? Music music) (instance? Tempo music))
+       ;; handle displacement
+       (if (and (:displacement (meta music)) (not (= 0 (:displacement (meta music)))))
+         (recur (assoc (dissoc playlist element)
+                  [container (+ ticks (:displacement (meta music)))])
+                out tempo-out (rest tick-seq))
+         (cond
+          ;; play the music
+          (and (instance? Music music) (not (nil? (:music music))) (not (nil? out)))
+          (do 
+            (out (:music music) (meta music))
+            (let [duration (if (vector? container) 0 (:duration music))]
+              (recur (assoc playlist [next (+ ticks duration)]) out tempo-out (rest tick-seq))))
+          (and (instance? Tempo music) (not (nil? (:tempo music))) (not (nil? tempo-out)))
+          (do 
+            (tempo-out (:tempo music) (meta music))
+            (recur playlist out tempo-out (rest tick-seq)))))
+             ;; If this came from a vector, set the duration to zero.
+       ;; skip anything else
+       :else
+       (recur (dissoc playlist element) out tempo-out (rest tick-seq))))))
 
