@@ -79,6 +79,8 @@
         note-val (find notes (symbol note))]  
     (max 0 (min 127 (+ (* 12 (inc octave)) note-val)))))
 
+;; outputs an options map which updates the value-fn and also returns
+;; a midimessage as :music 
 (defn play-note [note attrs]
   (fn [options]
     (let [attrs (merge options attrs)
@@ -405,7 +407,7 @@
 
 ;; transformations
 ;; maps: ([{} b c] d e) -> (#^{} [<m> b c] d e)
-;;   ({} b c) -> #^{} (<m> b c)
+;;       ({} b c) -> #^{} (<m> b c)
 ;; vectors: ([a b c] d e) -> [a ([b c] d e)] -> ([b c] d e)
 ;; -> [b ([c] d e)] -> ([c] d e) -> (c d e) -> (d e) -> (d e)
 ;; -> (e) -> ()
@@ -447,18 +449,18 @@
        (map? music)
        (recur (dissoc playlist element) out tempo-out
               (cons [(if (contains? music :music)
-                       (if (vector? container)
-                         (vec (cons (with-meta (:music music) (dissoc music :music)) next))
+                       ((if (vector? container) vec identity)
                          (cons (with-meta (:music music) (dissoc music :music)) next))
                        (with-meta next (merge (meta next) music))) ticks] (rest tick-seq)))
        (and (or (vector? music) (seq? music)) (map? (first music)))
        (recur (dissoc playlist element) out tempo-out
-              (cons [(if (contains? (first music) :music)
-                       (if (vector? music)
-                         (vec (cons (with-meta (:music music) (dissoc music :music)) next))
-                         (cons (with-meta (:music music) (dissoc music :music)) next))
-                       (with-meta next (merge (meta next) music))) ticks] (rest tick-seq)))
-              
+              (cons [((if (vector? container) vec identity)
+                      (cons (with-meta
+                              ((if (vector? music) vec identity)
+                               (if (contains? (first music) :music)
+                                 (cons (:music (first music)) (rest music))
+                                 (rest (first music))))
+                              (dissoc (first music) :music)) next)) ticks] (rest tick-seq)))
        ;; rewrite the terms to factor non-seq/vector terms to the
        ;; first position. Make sure metadata gets propagated
        ;; through seqs/vectors.
